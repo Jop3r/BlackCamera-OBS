@@ -24,6 +24,7 @@ struct Settings {
     bool  faceZoom      = true;
     float minFont       = 10.0f;         // also the fixed font size when face zoom is off
     float maxFont       = 45.0f;
+    bool  scaleFont     = true;          // font sizes are for a 1080-px-high picture, scaled to the real height
     float zoomSpeed     = 0.2f;
     bool  showHud       = true;
     float hysteresis    = 0.06f;         // zoom dead zone, fraction of current face size

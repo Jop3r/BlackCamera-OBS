@@ -5,7 +5,8 @@
   "dependencies": [
     {
       "name": "opencv4",
-      "features": [ "dnn" ]
+      "default-features": false,
+      "features": [ "calib3d", "dnn", "fs", "intrinsics", "thread" ]
     }
   ],
   "builtin-baseline": "b46d9050a9d40d54d24cac3ef8d50402d421f598"

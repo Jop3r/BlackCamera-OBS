@@ -1,0 +1,126 @@
+name: build
+
+on:
+  push:
+    branches: [ master ]
+    tags: [ 'v*' ]
+    # Docs-only changes do not need a build (path filters do not apply to tag pushes)
+    paths-ignore: [ '**.md', 'LICENSE' ]
+  pull_request:
+    paths-ignore: [ '**.md', 'LICENSE' ]
+  workflow_dispatch:
+
+# A newer push to the same branch or PR cancels the build that is still running
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write # gh release create on tags
+
+env:
+  VCPKG_COMMIT: b46d9050a9d40d54d24cac3ef8d50402d421f598
+  # libobs the plugin is built against; plugins load in this and newer OBS versions
+  OBS_VERSION: 32.2.2
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    env:
+      # Built vcpkg packages are cached between runs; only the first run (or a vcpkg.json change)
+      # builds OpenCV, protobuf and abseil from source.
+      # Own variable: run-vcpkg overrides VCPKG_DEFAULT_BINARY_CACHE with a random per-run folder,
+      # which actions/cache could never restore into.
+      VCPKG_CACHE_DIR: ${{ github.workspace }}/vcpkg-binary-cache
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── libobs ────────────────────────────────────────────────────────────
+      - name: Restore libobs SDK
+        id: obs-sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: .deps/obs-sdk
+          key: obs-sdk-${{ env.OBS_VERSION }}-${{ hashFiles('tools/obs-sdk.ps1') }}
+
+      # tools/obs-sdk.ps1 needs only obs.dll of an installed OBS: take it from the release archive
+      - name: Prepare libobs SDK from the OBS ${{ env.OBS_VERSION }} release
+        if: steps.obs-sdk-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $zip = Join-Path $env:RUNNER_TEMP 'obs.zip'
+          Invoke-WebRequest "https://github.com/obsproject/obs-studio/releases/download/$env:OBS_VERSION/OBS-Studio-$env:OBS_VERSION-Windows-x64.zip" -OutFile $zip
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [IO.Compression.ZipFile]::OpenRead($zip)
+          try {
+            $entry = $archive.Entries | Where-Object { $_.FullName -match '(^|/)bin/64bit/obs\.dll$' } | Select-Object -First 1
+            if (-not $entry) { throw 'obs.dll not found in the OBS archive' }
+            $obsDir = Join-Path $env:RUNNER_TEMP 'obs'
+            New-Item -ItemType Directory -Force (Join-Path $obsDir 'bin\64bit') | Out-Null
+            [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, (Join-Path $obsDir 'bin\64bit\obs.dll'), $true)
+          } finally { $archive.Dispose() }
+          ./tools/obs-sdk.ps1 -ObsDir $obsDir -Version $env:OBS_VERSION
+
+      # ── vcpkg ─────────────────────────────────────────────────────────────
+      - name: Restore vcpkg binary cache
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.VCPKG_CACHE_DIR }}
+          key: vcpkg-bin-x64-windows-static-md-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-bin-x64-windows-static-md-${{ env.VCPKG_COMMIT }}-
+
+      - name: Create binary cache folder
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force "$env:VCPKG_CACHE_DIR" | Out-Null
+
+      - name: Set up vcpkg (same commit as builtin-baseline)
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT }}
+
+      # run-vcpkg sets VCPKG_BINARY_SOURCES to the x-gha backend, which current vcpkg has removed.
+      # Point vcpkg at the folder that actions/cache saves instead.
+      - name: Use the cached folder as the vcpkg binary cache
+        shell: pwsh
+        run: '"VCPKG_BINARY_SOURCES=clear;files,$env:VCPKG_CACHE_DIR,readwrite" >> $env:GITHUB_ENV'
+
+      # ── Build ─────────────────────────────────────────────────────────────
+      - name: Configure and build
+        run: cmake --workflow --preset release
+
+      # Saved even when the build fails, so the next run does not rebuild the dependencies
+      - name: Save vcpkg binary cache
+        if: ${{ !cancelled() && steps.vcpkg-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.VCPKG_CACHE_DIR }}
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
+
+      - name: Package
+        shell: pwsh
+        run: ./tools/package.ps1 ${{ startsWith(github.ref, 'refs/tags/v') && format('-Tag {0}', github.ref_name) || '' }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blackcamera-obs-windows-x64
+          path: dist/*.zip
+
+      # ── Release (tags v*) ─────────────────────────────────────────────────
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $zip = (Get-ChildItem dist/*.zip).FullName
+          $notes = @"
+          Built against OBS Studio $env:OBS_VERSION (Windows x64).
+
+          **Install:** close OBS, extract the archive into ``%ProgramData%\obs-studio\plugins`` (you get ``%ProgramData%\obs-studio\plugins\blackcamera-obs``), start OBS. Then right-click a source → **Filters** → **+** → **BlackCamera ASCII**.
+
+          **Uninstall:** delete ``%ProgramData%\obs-studio\plugins\blackcamera-obs``.
+          "@
+          gh release create $env:GITHUB_REF_NAME $zip --verify-tag --title "BlackCamera OBS $env:GITHUB_REF_NAME" --notes $notes

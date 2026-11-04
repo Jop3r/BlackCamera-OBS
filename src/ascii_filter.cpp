@@ -44,6 +44,7 @@ constexpr const char* P_ANTIALIAS      = "antialias";
 constexpr const char* P_CHARSET        = "charset";
 constexpr const char* P_CUSTOM_CHARSET = "custom_charset";
 constexpr const char* P_FONT           = "font_size";      // Settings::minFont
+constexpr const char* P_SCALE_FONT     = "scale_font";
 constexpr const char* P_FACE_ZOOM      = "face_zoom";      // checkable group
 constexpr const char* P_MAX_FONT       = "max_font";
 constexpr const char* P_ZOOM_SPEED     = "zoom_speed";
@@ -123,7 +124,13 @@ void workerLoop(AsciiFilter* f) {
             renderer.resize(frame.cols, frame.rows);
         }
 
-        const Settings s = f->settings.get();
+        Settings s = f->settings.get();
+        if (s.scaleFont) {
+            // Font sizes are set for a 1080-px-high picture
+            const float k = frame.rows / 1080.0f;
+            s.minFont *= k;
+            s.maxFont *= k;
+        }
         cv::cvtColor(frame, bgr, cv::COLOR_BGRA2BGR);
         const float fontSize = tracker.update(bgr, true, s, bgr.cols, bgr.rows);
         const cv::Mat ascii = renderer.render(bgr, fontSize, s, s.charset(), tracker.hud());
@@ -148,11 +155,13 @@ void destroyStages(AsciiFilter* f) {
     f->stageW = f->stageH = 0;
 }
 
-// Renders the filter target and passes the frame staged on the previous call to the worker
+// Renders the filter target and passes the frame staged on the previous call to the worker.
+// The target is rendered in SDR sRGB: OBS tone-maps HDR sources into it, so the CPU
+// always gets 8-bit sRGB pixels.
 void captureTarget(AsciiFilter* f, obs_source_t* target, uint32_t w, uint32_t h) {
     if (!f->texrender) f->texrender = gs_texrender_create(GS_BGRA, GS_ZS_NONE);
     gs_texrender_reset(f->texrender);
-    if (!gs_texrender_begin(f->texrender, w, h)) return;
+    if (!gs_texrender_begin_with_color_space(f->texrender, w, h, GS_CS_SRGB)) return;
     vec4 clear;
     vec4_zero(&clear);
     gs_clear(GS_CLEAR_COLOR, &clear, 0.0f, 0);
@@ -220,6 +229,7 @@ void filterUpdate(void* data, obs_data_t* d) {
     s.charsetPreset = (int)obs_data_get_int(d, P_CHARSET);
     s.customCharset = obs_data_get_string(d, P_CUSTOM_CHARSET);
     s.minFont       = (float)obs_data_get_double(d, P_FONT);
+    s.scaleFont     = obs_data_get_bool(d, P_SCALE_FONT);
     s.faceZoom      = obs_data_get_bool(d, P_FACE_ZOOM);
     s.maxFont       = (float)obs_data_get_double(d, P_MAX_FONT);
     s.zoomSpeed     = (float)obs_data_get_double(d, P_ZOOM_SPEED);
@@ -243,6 +253,7 @@ void filterDefaults(obs_data_t* d) {
     obs_data_set_default_int(d, P_CHARSET, s.charsetPreset);
     obs_data_set_default_string(d, P_CUSTOM_CHARSET, s.customCharset.c_str());
     obs_data_set_default_double(d, P_FONT, s.minFont);
+    obs_data_set_default_bool(d, P_SCALE_FONT, s.scaleFont);
     obs_data_set_default_bool(d, P_FACE_ZOOM, s.faceZoom);
     obs_data_set_default_double(d, P_MAX_FONT, s.maxFont);
     obs_data_set_default_double(d, P_ZOOM_SPEED, s.zoomSpeed);
@@ -296,6 +307,8 @@ obs_properties_t* filterProperties(void*) {
     obs_properties_add_text(props, P_CUSTOM_CHARSET, T("CustomCharset"), OBS_TEXT_DEFAULT);
 
     obs_properties_add_float_slider(props, P_FONT, T("FontSize"), 5.0, 150.0, 0.5);
+    obs_property_t* scale = obs_properties_add_bool(props, P_SCALE_FONT, T("ScaleFont"));
+    obs_property_set_long_description(scale, T("ScaleFont.Description"));
 
     obs_properties_t* zoom = obs_properties_create();
     obs_properties_add_float_slider(zoom, P_MAX_FONT, T("MaxFont"), 30.0, 150.0, 0.5);
@@ -364,9 +377,24 @@ void filterRender(void* data, gs_effect_t*) {
         obs_source_skip_video_filter(f->context);
         return;
     }
+    // The result holds sRGB-encoded pixels: sample them linearized and let the framebuffer
+    // encode again, which is exact for 8-bit targets and correct for 16-bit (linear) ones.
+    // OBS converts the SRGB output to an HDR canvas itself (filterColorSpace).
+    const bool previousSrgb = gs_framebuffer_srgb_enabled();
+    gs_enable_framebuffer_srgb(true);
     gs_effect_t* effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
-    gs_effect_set_texture(gs_effect_get_param_by_name(effect, "image"), f->output);
+    gs_effect_set_texture_srgb(gs_effect_get_param_by_name(effect, "image"), f->output);
     while (gs_effect_loop(effect, "Draw")) gs_draw_sprite(f->output, 0, w, h);
+    gs_enable_framebuffer_srgb(previousSrgb);
+}
+
+// The effect output is SDR sRGB. Until the first result the source is passed through,
+// so its own color space applies.
+gs_color_space filterColorSpace(void* data, size_t count, const gs_color_space* preferred) {
+    auto* f = static_cast<AsciiFilter*>(data);
+    if (f->output) return GS_CS_SRGB;
+    obs_source_t* target = obs_filter_get_target(f->context);
+    return target ? obs_source_get_color_space(target, count, preferred) : GS_CS_SRGB;
 }
 
 } // namespace
@@ -375,7 +403,7 @@ void registerAsciiFilter() {
     static obs_source_info info = {};
     info.id             = kFilterId;
     info.type           = OBS_SOURCE_TYPE_FILTER;
-    info.output_flags   = OBS_SOURCE_VIDEO;
+    info.output_flags   = OBS_SOURCE_VIDEO | OBS_SOURCE_SRGB;
     info.get_name       = filterName;
     info.create         = filterCreate;
     info.destroy        = filterDestroy;
@@ -384,5 +412,6 @@ void registerAsciiFilter() {
     info.get_properties = filterProperties;
     info.video_tick     = filterTick;
     info.video_render   = filterRender;
+    info.video_get_color_space = filterColorSpace;
     obs_register_source(&info);
 }

@@ -1,6 +1,7 @@
 # Build outputs
 build/
 out/
+dist/
 vcpkg_installed/
 *.dll
 *.pdb

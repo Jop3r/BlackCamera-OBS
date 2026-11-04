@@ -5,12 +5,12 @@
     {
       "name": "default",
       "displayName": "Windows x64 (vcpkg manifest)",
-      "description": "Visual Studio generator, dependencies from vcpkg.json. Requires the VCPKG_ROOT environment variable and the libobs SDK (tools/obs-sdk.ps1).",
+      "description": "Visual Studio generator, dependencies from vcpkg.json linked statically (dynamic CRT, like OBS). Requires the VCPKG_ROOT environment variable and the libobs SDK (tools/obs-sdk.ps1).",
       "binaryDir": "${sourceDir}/build",
       "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
       "architecture": { "value": "x64", "strategy": "set" },
       "cacheVariables": {
-        "VCPKG_TARGET_TRIPLET": "x64-windows"
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static-md"
       }
     }
   ],
