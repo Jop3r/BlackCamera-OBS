@@ -1,0 +1,12 @@
+{
+  "name": "blackcamera-obs",
+  "version": "0.1.0",
+  "description": "BlackCamera ASCII video filter for OBS Studio",
+  "dependencies": [
+    {
+      "name": "opencv4",
+      "features": [ "dnn" ]
+    }
+  ],
+  "builtin-baseline": "b46d9050a9d40d54d24cac3ef8d50402d421f598"
+}

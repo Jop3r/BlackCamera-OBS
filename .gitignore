@@ -1,0 +1,24 @@
+# Build outputs
+build/
+out/
+vcpkg_installed/
+*.dll
+*.pdb
+*.lib
+*.exp
+
+# libobs SDK and obs-studio sources from tools/obs-sdk.ps1
+.deps/
+
+# Visual Studio
+.vs/
+*.user
+
+# Claude Code (local instructions, not published)
+.claude/
+CLAUDE.md
+AGENTS.md
+
+# OS
+Thumbs.db
+Desktop.ini
